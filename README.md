@@ -4,7 +4,7 @@
 
 ## Проблема
 
-Ползунок громкости (виджет `volumepulse` в `wf-panel-pi`) не менял громкость — двигался, а звук оставался на месте.
+Ползунок громкости (виджет `volume` в `wf-panel-pi`) не менял громкость — двигался, а звук оставался на месте.
 
 ## Причина
 
@@ -17,7 +17,7 @@ $ pactl list short sinks
 2  alsa_output.platform-fef00700.hdmi.stereo-fallback     PipeWire  SUSPENDED
 ```
 
-Default sink — Bluetooth, а пользователь слушал через HDMI. `volumepulse` честно менял громкость Bluetooth, а она ни на что не влияла.
+Default sink — Bluetooth, а пользователь слушал через HDMI. `volume` честно менял громкость Bluetooth, а она ни на что не влияла.
 
 **Диагностика:**
 ```bash
@@ -55,7 +55,7 @@ WirePlumber при старте сканирует устройства. Bluetoo
 
 ### Временный (если ползунок снова мёртвый)
 
-Перезапуск панели восстанавливает связь `volumepulse` с PipeWire:
+Перезапуск панели восстанавливает связь `volume` с PipeWire:
 
 ```bash
 kill -HUP $(pgrep -f "wf-panel-pi")
@@ -68,7 +68,7 @@ pkill -f "wf-panel-pi"
 
 ### Причина
 
-`volumepulse` дёргал PulseAudio → HDMI-аудио генерировала DRM property change → `udevadm monitor` ловил слово "change" → `panel-watchdog.sh` убивал и перезапускал панели → новый `volumepulse` снова триггерил цикл.
+`volume` дёргал PulseAudio → HDMI-аудио генерировала DRM property change → `udevadm monitor` ловил слово "change" → `panel-watchdog.sh` убивал и перезапускал панели → новый `volume` снова триггерил цикл.
 
 ### Фиксы в panel-watchdog.sh
 

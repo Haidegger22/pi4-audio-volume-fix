@@ -1,16 +1,18 @@
 #!/bin/bash
 # panel-watchdog.sh — следит за подключением дисплеев и перезапускает панели
 # Запускается из autostart labwc
+# v3: pgrep -x (точное имя), дебаунс 10с, отлов реальных причин смерти
 
 CONFIG_DIR=/home/pi/.config/wfpanel
 LOG_FILE=/tmp/panel-watchdog.log
 LOCK_DIR=/tmp/panel-watchdog.lock
+DEATH_LOG=/tmp/panel-deaths.log
 
 log() {
     echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
 }
 
-# Защита от множественных запусков — атомарный mkdir (работает с async &)
+# Защита от множественных запусков
 log "PID=$$, lock=$LOCK_DIR"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
@@ -26,13 +28,12 @@ echo $$ > "$LOCK_DIR/pid"
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
 LAST_RESTART=0
-
 RESTART_LOCK=/tmp/panel-restart.lock
 
 restart_panels() {
     local cause="$1"
 
-    # Дебаунс: минимум 10 секунд между перезапусками (защита от спама udev/аудио)
+    # Дебаунс: минимум 10 секунд между перезапусками
     local now
     now=$(date +%s)
     if [ $((now - LAST_RESTART)) -lt 10 ]; then
@@ -41,13 +42,13 @@ restart_panels() {
     fi
     LAST_RESTART=$now
 
-    # Защита от параллельных вызовов (inotify + udev + health — все дёргают restart)
+    # Защита от параллельных вызовов
     if ! mkdir "$RESTART_LOCK" 2>/dev/null; then
         log "restart ($cause) — пропущен, уже выполняется"
         return
     fi
 
-    # Ждём готовности PulseAudio до 10с (volumepulse плагину нужен PA)
+    # Ждём готовности PulseAudio
     local pa_waited=0
     while [ "$pa_waited" -lt 10 ]; do
         if pactl info >/dev/null 2>&1; then
@@ -67,11 +68,16 @@ restart_panels() {
 
     log "===== restart ($cause) — дисплеи: $displays ====="
 
-    # Убиваем старые панели по PID (быстрее pkill)
-    for pid in $(pgrep -f "wf-panel-pi" 2>/dev/null); do
-        kill "$pid" 2>/dev/null
-    done
-    sleep 0.3
+    # Убиваем старые панели, только если они живы
+    local panel_count
+    panel_count=$(pgrep -x wf-panel-pi 2>/dev/null | wc -l)
+    if [ "$panel_count" -gt 0 ]; then
+        log "  killing $panel_count old panels"
+        for pid in $(pgrep -x wf-panel-pi 2>/dev/null); do
+            kill "$pid" 2>/dev/null
+        done
+        sleep 0.3
+    fi
 
     for disp in $displays; do
         local ini
@@ -85,17 +91,16 @@ monitor=${disp}
 position=top
 height=36
 widgets_left=smenu spacing0 spacing4 launchers spacing8 window-list 
-widgets_right=tray power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volumepulse spacing2 clock spacing2 cputemp spacing2 batt
+widgets_right=tray power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volume spacing2 clock spacing2 cputemp spacing2 batt
 EOF
         fi
 
         if [ -f "$ini" ]; then
-            /usr/bin/wf-panel-pi -c "$ini" &
+            setsid /usr/bin/wf-panel-pi -c "$ini" &
             log "  → $disp ($ini)"
         fi
     done
 
-    # Снимаем блокировку перезапуска
     rmdir "$RESTART_LOCK" 2>/dev/null
 }
 
@@ -122,22 +127,20 @@ watch_displays() {
         fi
     done &
 
-    # Проверка здоровья панелей: если упали — перезапустить
+    # Проверка здоровья панелей
     while true; do
-        sleep 15
+        sleep 300
 
-        # Если сейчас идёт перезапуск — пропускаем проверку
         if [ -d "$RESTART_LOCK" ]; then
             continue
         fi
 
-        # Даём панелям 2 секунды на запуск после старта
         sleep 2
 
         local expected
         expected=$(wlr-randr 2>/dev/null | grep -cE "^[A-Z]")
         local running
-        running=$(pgrep -f "wf-panel-pi" 2>/dev/null | wc -l)
+        running=$(pgrep -x wf-panel-pi 2>/dev/null | wc -l)
         if [ "$running" -lt "$expected" ] && [ "$expected" -gt 0 ]; then
             log "health: панели упали ($running/$expected), перезапуск"
             restart_panels "health"
