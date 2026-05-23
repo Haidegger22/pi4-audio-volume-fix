@@ -1,0 +1,8 @@
+[Unit]
+Description=Monitor Bluetooth audio sink changes
+
+[Path]
+PathChanged=/tmp/bt-sink-trigger
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart wfpanel on BT audio change
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/.local/bin/bt-panel-restart.sh
+
+[Install]
+WantedBy=default.target

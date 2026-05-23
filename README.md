@@ -1,6 +1,6 @@
 # Pi4 Audio Volume Fix
 
-Решение проблемы с ползунком громкости на Raspberry Pi 4 (Wayland, labwc, PipeWire, Bluetooth-наушники).
+Решение проблемы с регулировкой громкости на Raspberry Pi 4 (Wayland, labwc, PipeWire, Bluetooth-наушники).
 
 ## Проблема
 
@@ -27,22 +27,15 @@ pactl get-default-sink
 
 ## Фикс
 
-### Runtime (проверка)
-```bash
-pactl set-default-sink bluez_output.18_B9_6E_02_E1_09.1
-```
-
-### Персистентно (через перезагрузки)
+### Default sink на Bluetooth (WirePlumber)
 
 WirePlumber-конфиг, который задаёт Bluetooth-выходам приоритет выше остальных:
 
 ```lua
--- Файл: ~/.config/wireplumber/main.lua.d/51-default-bluetooth-sink.lua
+-- ~/.config/wireplumber/main.lua.d/51-default-bluetooth-sink.lua
 rule = {
   matches = {
-    {
-      { "node.name", "matches", "bluez_output.*" },
-    },
+    { { "node.name", "matches", "bluez_output.*" } },
   },
   apply_properties = {
     ["priority.session"] = 3000,
@@ -51,7 +44,52 @@ rule = {
 table.insert(alsa_monitor.rules, rule)
 ```
 
-WirePlumber при старте сканирует устройства. Bluetooth получает `priority.session = 3000` (выше стандартных 1000–2000) → PipeWire делает его default sink'ом.
+### Runtime (проверка)
+```bash
+pactl set-default-sink bluez_output.18_B9_6E_02_E1_09.1
+```
+
+### Горячие клавиши громкости
+
+В конфиге labwc (`~/.config/labwc/rc.xml`) прописаны хоткеи, которые работают через `pactl` с `@DEFAULT_SINK@`:
+
+| Клавиша | Действие |
+|---------|----------|
+| `Shift+F5` | Громче (+5%) |
+| `Shift+F4` | Тише (-5%) |
+| `Shift+F3` | Mute |
+| `XF86AudioRaiseVolume` | Громче (+5%) |
+| `XF86AudioLowerVolume` | Тише (-5%) |
+| `XF86AudioMute` | Mute |
+
+Исходник: `configs/labwc/rc.xml` (в репозитории `pi-dual-display`).
+
+### Combine-sink для программной регулировки (если BT не поддерживает аппаратную)
+
+Некоторые BT-наушники не имеют аппаратной регулировки громкости. В этом случае помогает `module-combine-sink`:
+
+```bash
+pactl load-module module-combine-sink sink_name=bt-combine slaves=$(pactl get-default-sink)
+pactl set-default-sink bt-combine
+```
+
+**Автоматизация** — systemd path-unit и скрипты в этом репозитории:
+
+```bash
+# Установка
+cp scripts/bt-combine.sh ~/.local/bin/
+cp scripts/bt-panel-restart.sh ~/.local/bin/
+chmod +x ~/.local/bin/bt-combine.sh ~/.local/bin/bt-panel-restart.sh
+
+cp systemd/bt-audio.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now bt-audio.path
+```
+
+**Как работает:**
+1. `bt-combine.sh` создаёт combined-sink при подключении BT-аудио и создаёт файл `/tmp/bt-sink-trigger`
+2. `bt-audio.path` (systemd path-unit) отслеживает изменения этого файла
+3. `bt-audio.service` запускает `bt-panel-restart.sh`, который перезапускает панели для обновления списка аудиовыходов
 
 ### Временный (если ползунок снова мёртвый)
 
@@ -64,6 +102,22 @@ pkill -f "wf-panel-pi"
 # watchdog перезапустит автоматически
 ```
 
+## Команды для терминала
+
+```bash
+# Громкость
+pactl set-sink-volume @DEFAULT_SINK@ +5%
+pactl set-sink-volume @DEFAULT_SINK@ -5%
+
+# Mute
+pactl set-sink-mute @DEFAULT_SINK@ toggle
+
+# Информация
+pactl get-default-sink
+pactl list sinks short
+pactl get-sink-volume @DEFAULT_SINK@
+```
+
 ## Сопутствующая проблема: панели перезапускались каждые 30-60 сек
 
 ### Причина
@@ -72,61 +126,59 @@ pkill -f "wf-panel-pi"
 
 ### Фиксы в panel-watchdog.sh
 
-**1. Дебаунс 10 секунд:**
-```bash
-# Глобальная переменная
-LAST_RESTART=0
+**1. Дебаунс 10 секунд, 2. RESTART_LOCK, 3. mkdir-блокировка, 4. Удалён `updater` из виджетов панели**
 
-# В начало restart_panels()
-local now=$(date +%s)
-if [ $((now - LAST_RESTART)) -lt 10 ]; then
-    log "restart ($cause) — пропущен, интервал < 10с"
-    return
-fi
-LAST_RESTART=$now
+Подробнее в `watchdog/panel-watchdog.sh`.
+
+## Ещё одна причина падений панелей (исправлена)
+
+`bt-volume-check.timer` (системный таймер) срабатывал каждые 30 секунд и вызывал `bt-panel-restart.sh`, который делал `killall wf-panel-pi`, убивая все панели. **Заменён на systemd path-unit** (см. выше), который срабатывает только при реальном подключении Bluetooth.
+
+## Файлы в репозитории
+
+```
+scripts/
+├── bt-combine.sh           # Создание combine-sink при BT + триггер
+└── bt-panel-restart.sh     # Перезапуск панелей при BT
+
+systemd/
+├── bt-audio.path           # Path-unit для BT-триггера
+└── bt-audio.service        # Oneshot-сервис перезапуска панелей
+
+watchdog/
+└── panel-watchdog.sh       # Watchdog панелей с дебаунсом
+
+wireplumber-conf/
+└── 51-default-bluetooth-sink.lua  # Приоритет BT-выхода
+
+configs/labwc/rc.xml        # Хоткеи громкости (в pi-dual-display)
 ```
 
-**2. RESTART_LOCK — защита от параллельных вызовов:**
+## Установка всего комплекта
+
 ```bash
-RESTART_LOCK=/tmp/panel-restart.lock
-if ! mkdir "$RESTART_LOCK" 2>/dev/null; then
-    log "restart ($cause) — пропущен, уже выполняется"
-    return
-fi
-# ... restart logic ...
-rmdir "$RESTART_LOCK"
+# 1. WirePlumber (default BT sink)
+mkdir -p ~/.config/wireplumber/main.lua.d
+cp wireplumber-conf/51-default-bluetooth-sink.lua ~/.config/wireplumber/main.lua.d/
+
+# 2. BT audio path-unit
+cp scripts/bt-combine.sh ~/.local/bin/
+cp scripts/bt-panel-restart.sh ~/.local/bin/
+chmod +x ~/.local/bin/bt-combine.sh ~/.local/bin/bt-panel-restart.sh
+cp systemd/bt-audio.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now bt-audio.path
+
+# 3. Watchdog панелей (опционально)
+cp watchdog/panel-watchdog.sh ~/.local/bin/
+chmod +x ~/.local/bin/panel-watchdog.sh
 ```
-
-**3. mkdir-блокировка от дубликатов watchdog:**
-```bash
-LOCK_DIR=/tmp/panel-watchdog.lock
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    OLD_PID=$(cat "$LOCK_DIR/pid")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        log "WARN: watchdog уже запущен (PID $OLD_PID)"
-        exit 0
-    fi
-    rmdir "$LOCK_DIR"
-    mkdir "$LOCK_DIR"
-fi
-echo $$ > "$LOCK_DIR/pid"
-```
-
-**4. Удалён `updater` из виджетов панели** — он крашил `wf-panel-pi` после проверки обновлений.
-
-## Используемые файлы
-
-| Файл | Назначение |
-|------|-----------|
-| `~/.config/wireplumber/main.lua.d/51-default-bluetooth-sink.lua` | Фиксация default sink на BT |
-| `~/.local/bin/panel-watchdog.sh` | Watchdog панелей с дебаунсом |
-| `~/.local/bin/panel-watchdog.sh.bak` | Оригинал watchdog до фиксов |
 
 ## Стек
 
 - Raspberry Pi 4 (8GB), Debian 13 (trixie)
 - Wayland (labwc), wf-panel-pi
-- PipeWire 1.4.2 + WirePlumber
+- PipeWire + WirePlumber
 - PulseAudio-совместимость через PipeWire
 - Bluetooth-наушники Haylou-T15
 
